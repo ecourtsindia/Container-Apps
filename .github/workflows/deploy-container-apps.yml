@@ -1,0 +1,198 @@
+name: Deploy eCourts Container Apps
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  AZURE_RESOURCE_GROUP: rg-ecourts-${{ github.event.inputs.environment || 'dev' }}
+  AZURE_LOCATION: 'East US'
+  CONTAINER_REGISTRY: ecourtscr${{ github.event.inputs.environment || 'dev' }}
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Create Azure Container Registry
+      run: |
+        # Create resource group if it doesn't exist
+        az group create --name ${{ env.AZURE_RESOURCE_GROUP }} --location "${{ env.AZURE_LOCATION }}"
+        
+        # Create container registry if it doesn't exist
+        if ! az acr show --name ${{ env.CONTAINER_REGISTRY }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} 2>/dev/null; then
+          az acr create \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --name ${{ env.CONTAINER_REGISTRY }} \
+            --sku Basic \
+            --admin-enabled true
+        fi
+
+    - name: Get ACR credentials
+      id: acr-creds
+      run: |
+        ACR_SERVER=$(az acr show --name ${{ env.CONTAINER_REGISTRY }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query loginServer -o tsv)
+        ACR_USERNAME=$(az acr credential show --name ${{ env.CONTAINER_REGISTRY }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query username -o tsv)
+        ACR_PASSWORD=$(az acr credential show --name ${{ env.CONTAINER_REGISTRY }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query passwords[0].value -o tsv)
+        
+        echo "acr-server=$ACR_SERVER" >> $GITHUB_OUTPUT
+        echo "acr-username=$ACR_USERNAME" >> $GITHUB_OUTPUT
+        echo "::add-mask::$ACR_PASSWORD"
+        echo "acr-password=$ACR_PASSWORD" >> $GITHUB_OUTPUT
+
+    - name: Login to Azure Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ steps.acr-creds.outputs.acr-server }}
+        username: ${{ steps.acr-creds.outputs.acr-username }}
+        password: ${{ steps.acr-creds.outputs.acr-password }}
+
+    - name: Build and push Marker Conversion service
+      uses: docker/build-push-action@v5
+      with:
+        context: ./marker-service
+        file: ./marker-service/Dockerfile
+        push: true
+        tags: |
+          ${{ steps.acr-creds.outputs.acr-server }}/ecourts-markerconvert:latest
+          ${{ steps.acr-creds.outputs.acr-server }}/ecourts-markerconvert:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Build and push PDF Signing service
+      uses: docker/build-push-action@v5
+      with:
+        context: ./pdf-signing-service
+        file: ./pdf-signing-service/Dockerfile
+        push: true
+        tags: |
+          ${{ steps.acr-creds.outputs.acr-server }}/ecourts-pdfsigning:latest
+          ${{ steps.acr-creds.outputs.acr-server }}/ecourts-pdfsigning:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Deploy to Azure Container Apps
+      run: |
+        # Deploy using Bicep template
+        az deployment group create \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --template-file ./deployment/azure-container-apps-deployment.bicep \
+          --parameters \
+            namePrefix=ecourts \
+            environment=${{ env.ENVIRONMENT }} \
+            storageConnectionString="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+            certificatePassword="${{ secrets.CERTIFICATE_PASSWORD }}" \
+            containerRegistryLoginServer=${{ steps.acr-creds.outputs.acr-server }} \
+            containerRegistryUsername=${{ steps.acr-creds.outputs.acr-username }} \
+            containerRegistryPassword=${{ steps.acr-creds.outputs.acr-password }}
+
+    - name: Verify deployment
+      run: |
+        echo "🔍 Verifying Container Apps deployment..."
+        
+        # Wait for apps to be ready
+        sleep 30
+        
+        # Check Marker service
+        MARKER_STATUS=$(az containerapp show --name "ecourts-marker-${{ env.ENVIRONMENT }}" --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.provisioningState" -o tsv)
+        echo "Marker Service Status: $MARKER_STATUS"
+        
+        # Check PDF Signing service
+        PDF_STATUS=$(az containerapp show --name "ecourts-pdfsigning-${{ env.ENVIRONMENT }}" --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.provisioningState" -o tsv)
+        echo "PDF Signing Service Status: $PDF_STATUS"
+        
+        # Get FQDNs
+        MARKER_FQDN=$(az containerapp show --name "ecourts-marker-${{ env.ENVIRONMENT }}" --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
+        PDF_FQDN=$(az containerapp show --name "ecourts-pdfsigning-${{ env.ENVIRONMENT }}" --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
+        
+        echo "✅ Deployment completed!"
+        echo "📄 Marker Service: https://$MARKER_FQDN"
+        echo "🔐 PDF Signing Service: https://$PDF_FQDN"
+
+  test-deployment:
+    needs: build-and-deploy
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Test health endpoints
+      run: |
+        echo "🏥 Testing health endpoints..."
+        
+        # Get FQDNs
+        MARKER_FQDN=$(az containerapp show --name "ecourts-marker-${{ env.ENVIRONMENT }}" --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
+        PDF_FQDN=$(az containerapp show --name "ecourts-pdfsigning-${{ env.ENVIRONMENT }}" --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
+        
+        # Test health endpoints (retry logic)
+        for i in {1..5}; do
+          echo "Attempt $i: Testing Marker service health..."
+          if curl -f -s "https://$MARKER_FQDN/health" > /dev/null; then
+            echo "✅ Marker service is healthy"
+            break
+          else
+            echo "⚠️ Marker service not ready, waiting..."
+            sleep 30
+          fi
+        done
+        
+        for i in {1..5}; do
+          echo "Attempt $i: Testing PDF Signing service health..."
+          if curl -f -s "https://$PDF_FQDN/health" > /dev/null; then
+            echo "✅ PDF Signing service is healthy"
+            break
+          else
+            echo "⚠️ PDF Signing service not ready, waiting..."
+            sleep 30
+          fi
+        done
+        
+        echo "🎉 All services are healthy and ready!"
+
+    - name: Display deployment summary
+      run: |
+        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Environment:** ${{ env.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Resource Group:** ${{ env.AZURE_RESOURCE_GROUP }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Container Registry:** ${{ env.CONTAINER_REGISTRY }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Services Deployed:" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ eCourts Marker Conversion Service" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ eCourts PDF Signing Service" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Queue Processing:" >> $GITHUB_STEP_SUMMARY
+        echo "- 📥 marker-conversion-requests" >> $GITHUB_STEP_SUMMARY
+        echo "- 📥 pdf-signing-requests" >> $GITHUB_STEP_SUMMARY 

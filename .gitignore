@@ -1,0 +1,83 @@
+# Certificate files - NEVER commit these to version control
+*.pfx
+*.p12
+*.pem
+*.key
+*.crt
+
+# .NET build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.dll
+*.pdb
+*.exe
+
+# Visual Studio / Visual Studio Code
+.vs/
+.vscode/
+*.userprefs
+*.sln.docstates
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+logs/
+
+# Environment and configuration files
+.env
+.env.local
+.env.production
+appsettings.Development.json
+appsettings.*.json
+!appsettings.json
+
+# Azure and deployment files
+*.publishsettings
+*.azurePubxml
+
+# Docker
+.dockerignore
+Dockerfile.dev
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+*.swp
+*.swo
+*~
+
+# Azure Functions
+local.settings.json
+
+# Python (for Marker service)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Node.js (if any)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Backup files
+*.bak
+*.backup 
