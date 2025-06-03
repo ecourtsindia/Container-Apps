@@ -1,0 +1,174 @@
+name: Deploy eCourts Container Apps (Simple)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  AZURE_RESOURCE_GROUP: rg-ecourts-${{ github.event.inputs.environment }}
+  AZURE_LOCATION: 'East US'
+  CONTAINER_REGISTRY: ecourtscr${{ github.event.inputs.environment }}
+  ENVIRONMENT: ${{ github.event.inputs.environment }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Create Resource Group and Registry
+      run: |
+        # Create resource group
+        az group create --name ${{ env.AZURE_RESOURCE_GROUP }} --location "${{ env.AZURE_LOCATION }}"
+        
+        # Create container registry
+        if ! az acr show --name ${{ env.CONTAINER_REGISTRY }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} 2>/dev/null; then
+          az acr create \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --name ${{ env.CONTAINER_REGISTRY }} \
+            --sku Basic \
+            --admin-enabled true
+        fi
+
+    - name: Build and Push Images
+      run: |
+        # Get ACR login server
+        ACR_SERVER=$(az acr show --name ${{ env.CONTAINER_REGISTRY }} --query loginServer -o tsv)
+        
+        # Login to ACR
+        az acr login --name ${{ env.CONTAINER_REGISTRY }}
+        
+        # Build and push marker service
+        docker build -f marker-service/Dockerfile -t ${ACR_SERVER}/ecourts-markerconvert:latest .
+        docker push ${ACR_SERVER}/ecourts-markerconvert:latest
+        
+        # Build and push PDF service
+        docker build -f pdf-signing-service/Dockerfile -t ${ACR_SERVER}/ecourts-pdfsigning:latest .
+        docker push ${ACR_SERVER}/ecourts-pdfsigning:latest
+        
+        echo "Images pushed to: $ACR_SERVER"
+
+    - name: Create Container App Environment
+      run: |
+        # Create Log Analytics workspace
+        az monitor log-analytics workspace create \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --workspace-name ecourts-logs-${{ env.ENVIRONMENT }} \
+          --location "${{ env.AZURE_LOCATION }}"
+        
+        # Get workspace key
+        WORKSPACE_ID=$(az monitor log-analytics workspace show \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --workspace-name ecourts-logs-${{ env.ENVIRONMENT }} \
+          --query customerId -o tsv)
+        
+        WORKSPACE_KEY=$(az monitor log-analytics workspace get-shared-keys \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --workspace-name ecourts-logs-${{ env.ENVIRONMENT }} \
+          --query primarySharedKey -o tsv)
+        
+        # Create Container App Environment
+        az containerapp env create \
+          --name ecourts-env-${{ env.ENVIRONMENT }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --location "${{ env.AZURE_LOCATION }}" \
+          --logs-workspace-id $WORKSPACE_ID \
+          --logs-workspace-key $WORKSPACE_KEY
+
+    - name: Deploy Container Apps
+      run: |
+        # Get ACR details
+        ACR_SERVER=$(az acr show --name ${{ env.CONTAINER_REGISTRY }} --query loginServer -o tsv)
+        ACR_USERNAME=$(az acr credential show --name ${{ env.CONTAINER_REGISTRY }} --query username -o tsv)
+        ACR_PASSWORD=$(az acr credential show --name ${{ env.CONTAINER_REGISTRY }} --query passwords[0].value -o tsv)
+        
+        # Deploy Marker Service
+        az containerapp create \
+          --name ecourts-marker-${{ env.ENVIRONMENT }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --environment ecourts-env-${{ env.ENVIRONMENT }} \
+          --image ${ACR_SERVER}/ecourts-markerconvert:latest \
+          --registry-server $ACR_SERVER \
+          --registry-username $ACR_USERNAME \
+          --registry-password $ACR_PASSWORD \
+          --target-port 8080 \
+          --ingress external \
+          --cpu 2.0 \
+          --memory 4Gi \
+          --min-replicas 1 \
+          --max-replicas 5 \
+          --secrets "storage-connection-string=${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+          --env-vars \
+            "AZURE_STORAGE_CONNECTION_STRING=secretref:storage-connection-string" \
+            "ASPNETCORE_ENVIRONMENT=${{ env.ENVIRONMENT }}" \
+            "ASPNETCORE_URLS=http://0.0.0.0:8080" \
+            "MAX_PARALLELISM=2" \
+            "MAX_CONCURRENT_CONVERSIONS=1" \
+            "ENABLE_MARKER=true"
+        
+        # Deploy PDF Signing Service
+        az containerapp create \
+          --name ecourts-pdfsigning-${{ env.ENVIRONMENT }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --environment ecourts-env-${{ env.ENVIRONMENT }} \
+          --image ${ACR_SERVER}/ecourts-pdfsigning:latest \
+          --registry-server $ACR_SERVER \
+          --registry-username $ACR_USERNAME \
+          --registry-password $ACR_PASSWORD \
+          --target-port 8080 \
+          --ingress external \
+          --cpu 1.0 \
+          --memory 2Gi \
+          --min-replicas 1 \
+          --max-replicas 3 \
+          --secrets \
+            "storage-connection-string=${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+            "certificate-password=${{ secrets.CERTIFICATE_PASSWORD }}" \
+          --env-vars \
+            "AZURE_STORAGE_CONNECTION_STRING=secretref:storage-connection-string" \
+            "CERTIFICATE_PASSWORD=secretref:certificate-password" \
+            "CERTIFICATE_PATH=/app/certs/certificate.pfx" \
+            "ASPNETCORE_ENVIRONMENT=${{ env.ENVIRONMENT }}" \
+            "ASPNETCORE_URLS=http://0.0.0.0:8080" \
+            "MAX_PARALLELISM=2" \
+            "MAX_CONCURRENT_CONVERSIONS=1"
+
+    - name: Get Deployment URLs
+      run: |
+        # Get FQDNs
+        MARKER_FQDN=$(az containerapp show \
+          --name ecourts-marker-${{ env.ENVIRONMENT }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --query "properties.configuration.ingress.fqdn" -o tsv)
+        
+        PDF_FQDN=$(az containerapp show \
+          --name ecourts-pdfsigning-${{ env.ENVIRONMENT }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --query "properties.configuration.ingress.fqdn" -o tsv)
+        
+        echo "✅ Deployment completed!"
+        echo "📄 Marker Service: https://$MARKER_FQDN"
+        echo "🔐 PDF Signing Service: https://$PDF_FQDN"
+        echo ""
+        echo "📋 Test endpoints:"
+        echo "curl https://$MARKER_FQDN/health"
+        echo "curl https://$PDF_FQDN/health" 

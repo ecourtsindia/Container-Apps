@@ -24,8 +24,12 @@ env:
   ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
 
 jobs:
-  build-and-deploy:
+  build-images:
     runs-on: ubuntu-latest
+    outputs:
+      acr-server: ${{ steps.acr-creds.outputs.acr-server }}
+      acr-username: ${{ steps.acr-creds.outputs.acr-username }}
+      acr-password: ${{ steps.acr-creds.outputs.acr-password }}
     
     steps:
     - name: Checkout code
@@ -46,11 +50,17 @@ jobs:
         
         # Create container registry if it doesn't exist
         if ! az acr show --name ${{ env.CONTAINER_REGISTRY }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} 2>/dev/null; then
+          echo "Creating new container registry: ${{ env.CONTAINER_REGISTRY }}"
           az acr create \
             --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
             --name ${{ env.CONTAINER_REGISTRY }} \
             --sku Basic \
             --admin-enabled true
+          
+          # Wait for registry to be ready
+          sleep 30
+        else
+          echo "Container registry already exists: ${{ env.CONTAINER_REGISTRY }}"
         fi
 
     - name: Get ACR credentials
@@ -64,6 +74,9 @@ jobs:
         echo "acr-username=$ACR_USERNAME" >> $GITHUB_OUTPUT
         echo "::add-mask::$ACR_PASSWORD"
         echo "acr-password=$ACR_PASSWORD" >> $GITHUB_OUTPUT
+        
+        echo "Registry Server: $ACR_SERVER"
+        echo "Registry Username: $ACR_USERNAME"
 
     - name: Login to Azure Container Registry
       uses: docker/login-action@v3
@@ -71,6 +84,20 @@ jobs:
         registry: ${{ steps.acr-creds.outputs.acr-server }}
         username: ${{ steps.acr-creds.outputs.acr-username }}
         password: ${{ steps.acr-creds.outputs.acr-password }}
+
+    - name: Verify shared files exist
+      run: |
+        echo "Checking shared files..."
+        ls -la shared/
+        if [ ! -f "shared/Configuration.cs" ]; then
+          echo "❌ shared/Configuration.cs not found"
+          exit 1
+        fi
+        if [ ! -f "shared/Models.cs" ]; then
+          echo "❌ shared/Models.cs not found"
+          exit 1
+        fi
+        echo "✅ Shared files verified"
 
     - name: Build and push Marker Conversion service
       uses: docker/build-push-action@v5
@@ -83,6 +110,7 @@ jobs:
           ${{ steps.acr-creds.outputs.acr-server }}/ecourts-markerconvert:${{ github.sha }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+        platforms: linux/amd64
 
     - name: Build and push PDF Signing service
       uses: docker/build-push-action@v5
@@ -95,10 +123,49 @@ jobs:
           ${{ steps.acr-creds.outputs.acr-server }}/ecourts-pdfsigning:${{ github.sha }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+        platforms: linux/amd64
+
+    - name: Verify images were pushed
+      run: |
+        echo "Verifying pushed images..."
+        az acr repository list --name ${{ env.CONTAINER_REGISTRY }} --output table
+        
+        # Check if both images exist
+        if az acr repository show --name ${{ env.CONTAINER_REGISTRY }} --repository ecourts-markerconvert > /dev/null 2>&1; then
+          echo "✅ Marker service image found"
+        else
+          echo "❌ Marker service image not found"
+          exit 1
+        fi
+        
+        if az acr repository show --name ${{ env.CONTAINER_REGISTRY }} --repository ecourts-pdfsigning > /dev/null 2>&1; then
+          echo "✅ PDF signing service image found"
+        else
+          echo "❌ PDF signing service image not found"
+          exit 1
+        fi
+
+  deploy-apps:
+    needs: build-images
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
     - name: Deploy to Azure Container Apps
       run: |
-        # Deploy using Bicep template
+        echo "🚀 Deploying to Azure Container Apps..."
+        echo "Registry Server: ${{ needs.build-images.outputs.acr-server }}"
+        echo "Environment: ${{ env.ENVIRONMENT }}"
+        
+        # Deploy using Bicep template with explicit parameters
         az deployment group create \
           --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
           --template-file ./deployment/azure-container-apps-deployment.bicep \
@@ -107,16 +174,17 @@ jobs:
             environment=${{ env.ENVIRONMENT }} \
             storageConnectionString="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
             certificatePassword="${{ secrets.CERTIFICATE_PASSWORD }}" \
-            containerRegistryLoginServer=${{ steps.acr-creds.outputs.acr-server }} \
-            containerRegistryUsername=${{ steps.acr-creds.outputs.acr-username }} \
-            containerRegistryPassword=${{ steps.acr-creds.outputs.acr-password }}
+            containerRegistryLoginServer="${{ needs.build-images.outputs.acr-server }}" \
+            containerRegistryUsername="${{ needs.build-images.outputs.acr-username }}" \
+            containerRegistryPassword="${{ needs.build-images.outputs.acr-password }}" \
+          --verbose
 
     - name: Verify deployment
       run: |
         echo "🔍 Verifying Container Apps deployment..."
         
         # Wait for apps to be ready
-        sleep 30
+        sleep 60
         
         # Check Marker service
         MARKER_STATUS=$(az containerapp show --name "ecourts-marker-${{ env.ENVIRONMENT }}" --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.provisioningState" -o tsv)
@@ -135,7 +203,7 @@ jobs:
         echo "🔐 PDF Signing Service: https://$PDF_FQDN"
 
   test-deployment:
-    needs: build-and-deploy
+    needs: [build-images, deploy-apps]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     
@@ -156,8 +224,11 @@ jobs:
         MARKER_FQDN=$(az containerapp show --name "ecourts-marker-${{ env.ENVIRONMENT }}" --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
         PDF_FQDN=$(az containerapp show --name "ecourts-pdfsigning-${{ env.ENVIRONMENT }}" --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
         
+        echo "Testing Marker Service: https://$MARKER_FQDN"
+        echo "Testing PDF Service: https://$PDF_FQDN"
+        
         # Test health endpoints (retry logic)
-        for i in {1..5}; do
+        for i in {1..10}; do
           echo "Attempt $i: Testing Marker service health..."
           if curl -f -s "https://$MARKER_FQDN/health" > /dev/null; then
             echo "✅ Marker service is healthy"
@@ -168,7 +239,7 @@ jobs:
           fi
         done
         
-        for i in {1..5}; do
+        for i in {1..10}; do
           echo "Attempt $i: Testing PDF Signing service health..."
           if curl -f -s "https://$PDF_FQDN/health" > /dev/null; then
             echo "✅ PDF Signing service is healthy"
