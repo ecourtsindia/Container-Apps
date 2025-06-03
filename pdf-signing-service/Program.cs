@@ -203,13 +203,13 @@ public class PdfSigningService
 
         try
         {
-            var tempDir = Path.Combine(Path.GetTempPath(), $"signing_{request.RequestId}");
+            var tempDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"signing_{request.RequestId}");
             Directory.CreateDirectory(tempDir);
 
             try
             {
                 // Download PDF from blob storage
-                var originalPdfPath = Path.Combine(tempDir, $"{request.CnrNumber}-{request.OrderNumber}_original.pdf");
+                var originalPdfPath = System.IO.Path.Combine(tempDir, $"{request.CnrNumber}-{request.OrderNumber}_original.pdf");
                 var blobClient = _blobClient.GetBlobClient(request.PdfBlobPath);
                 
                 using (var fileStream = new FileStream(originalPdfPath, FileMode.Create))
@@ -259,13 +259,13 @@ public class PdfSigningService
 
         try
         {
-            var tempDir = Path.Combine(Path.GetTempPath(), $"signing_{request.RequestId}");
+            var tempDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"signing_{request.RequestId}");
             Directory.CreateDirectory(tempDir);
 
             try
             {
                 // Download PDF from URL
-                var originalPdfPath = Path.Combine(tempDir, $"{request.CnrNumber}-{request.OrderNumber}_original.pdf");
+                var originalPdfPath = System.IO.Path.Combine(tempDir, $"{request.CnrNumber}-{request.OrderNumber}_original.pdf");
                 using var httpClient = new HttpClient();
                 using var response = await httpClient.GetAsync(request.PdfUrl);
                 response.EnsureSuccessStatusCode();
@@ -311,11 +311,11 @@ public class PdfSigningService
     private async Task<string> ProcessPdf(string originalPdfPath, string cnrNumber, string orderNumber, string tempDir)
     {
         // Apply watermark
-        var watermarkedPath = Path.Combine(tempDir, $"{cnrNumber}-{orderNumber}_watermarked.pdf");
+        var watermarkedPath = System.IO.Path.Combine(tempDir, $"{cnrNumber}-{orderNumber}_watermarked.pdf");
         await ApplyWatermark(originalPdfPath, watermarkedPath, cnrNumber, orderNumber);
 
         // Sign PDF
-        var signedPath = Path.Combine(tempDir, $"{cnrNumber}-{orderNumber}_signed.pdf");
+        var signedPath = System.IO.Path.Combine(tempDir, $"{cnrNumber}-{orderNumber}_signed.pdf");
         await SignPdf(watermarkedPath, signedPath, cnrNumber, orderNumber);
 
         // Upload to file share

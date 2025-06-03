@@ -26,10 +26,13 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddHealthChecks();
 
 // Add Azure clients
-builder.Services.AddSingleton<BlobContainerClient>(provider =>
+builder.Services.AddSingleton(provider =>
     new BlobContainerClient(Configuration.ConnectionString, Configuration.PdfContainerName));
-builder.Services.AddSingleton<BlobContainerClient>("MarkdownBlobClient", provider =>
-    new BlobContainerClient(Configuration.ConnectionString, Configuration.MarkdownContainerName));
+builder.Services.AddSingleton(provider =>
+{
+    var markdownBlobClient = new BlobContainerClient(Configuration.ConnectionString, Configuration.MarkdownContainerName);
+    return markdownBlobClient;
+});
 
 // Add conversion service
 builder.Services.AddSingleton<MarkerConversionService>();
@@ -51,7 +54,7 @@ app.MapControllers();
 try
 {
     var blobClient = app.Services.GetRequiredService<BlobContainerClient>();
-    var markdownBlobClient = app.Services.GetService<BlobContainerClient>("MarkdownBlobClient");
+    var markdownBlobClient = new BlobContainerClient(Configuration.ConnectionString, Configuration.MarkdownContainerName);
     
     await blobClient.CreateIfNotExistsAsync();
     await markdownBlobClient.CreateIfNotExistsAsync();
@@ -171,11 +174,10 @@ public class MarkerConversionService
 
     public MarkerConversionService(
         BlobContainerClient pdfBlobClient,
-        IServiceProvider serviceProvider,
         ILogger<MarkerConversionService> logger)
     {
         _pdfBlobClient = pdfBlobClient;
-        _markdownBlobClient = serviceProvider.GetRequiredService<BlobContainerClient>("MarkdownBlobClient");
+        _markdownBlobClient = new BlobContainerClient(Configuration.ConnectionString, Configuration.MarkdownContainerName);
         _logger = logger;
         _conversionSemaphore = new SemaphoreSlim(Configuration.MaxConcurrentConversions, Configuration.MaxConcurrentConversions);
     }

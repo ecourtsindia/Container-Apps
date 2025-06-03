@@ -19,6 +19,7 @@ namespace eCourts.Shared
         // Container Names
         public static readonly string PdfContainerName = "district-courts-cnr-master";
         public static readonly string JsonContainerName = "district-court-causelists-raw";
+        public static readonly string MarkdownContainerName = "markdown-files";
         public static readonly string FileShareName = "ecourtsndiadocs";
         
         // Custom Domains

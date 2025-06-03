@@ -75,7 +75,7 @@ jobs:
     - name: Build and push Marker Conversion service
       uses: docker/build-push-action@v5
       with:
-        context: ./marker-service
+        context: .
         file: ./marker-service/Dockerfile
         push: true
         tags: |
@@ -87,7 +87,7 @@ jobs:
     - name: Build and push PDF Signing service
       uses: docker/build-push-action@v5
       with:
-        context: ./pdf-signing-service
+        context: .
         file: ./pdf-signing-service/Dockerfile
         push: true
         tags: |
@@ -189,10 +189,13 @@ jobs:
         echo "**Resource Group:** ${{ env.AZURE_RESOURCE_GROUP }}" >> $GITHUB_STEP_SUMMARY
         echo "**Container Registry:** ${{ env.CONTAINER_REGISTRY }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Services Deployed:" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ eCourts Marker Conversion Service" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ eCourts PDF Signing Service" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔗 API Services Deployed:" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ eCourts Marker Conversion Service (HTTP API)" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ eCourts PDF Signing Service (HTTP API)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Queue Processing:" >> $GITHUB_STEP_SUMMARY
-        echo "- 📥 marker-conversion-requests" >> $GITHUB_STEP_SUMMARY
-        echo "- 📥 pdf-signing-requests" >> $GITHUB_STEP_SUMMARY 
+        echo "### 📋 Available Endpoints:" >> $GITHUB_STEP_SUMMARY
+        echo "- 📄 POST /api/convert - Convert PDF to Markdown" >> $GITHUB_STEP_SUMMARY
+        echo "- 📄 POST /api/convert-from-url - Convert PDF from URL" >> $GITHUB_STEP_SUMMARY
+        echo "- 🔐 POST /api/sign - Sign PDF from blob storage" >> $GITHUB_STEP_SUMMARY
+        echo "- 🔐 POST /api/sign-from-url - Sign PDF from URL" >> $GITHUB_STEP_SUMMARY
+        echo "- ❤️ GET /health - Health check endpoints" >> $GITHUB_STEP_SUMMARY 
