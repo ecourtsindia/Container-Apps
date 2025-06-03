@@ -5,6 +5,8 @@ This project contains two independent Azure Container Apps for the eCourts syste
 1. **eCourts-MarkerConvert**: PDF to Markdown conversion using Marker
 2. **eCourts-PDFSigning**: PDF watermarking and digital signing
 
+   - Rachit
+
 ## Architecture
 
 ```
